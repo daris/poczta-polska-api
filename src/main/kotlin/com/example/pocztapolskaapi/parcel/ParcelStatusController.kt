@@ -1,63 +1,62 @@
 package com.example.pocztapolskaapi.parcel
 
-import com.example.pocztapolskaapi.config.SoapLoggingInterceptor
+import com.example.pocztapolska.client.PpApiTrackingWsTt
+import com.example.pocztapolska.client.Przesylka
+import com.example.pocztapolska.client.SledzeniePortType
+import jakarta.xml.ws.BindingProvider
+import org.apache.cxf.endpoint.Client
+import org.apache.cxf.frontend.ClientProxy
+import org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor
+import org.apache.wss4j.common.ext.WSPasswordCallback
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
-import org.springframework.ws.client.core.WebServiceMessageCallback
-import org.springframework.ws.client.core.WebServiceTemplate
-import org.springframework.ws.soap.SoapMessage
-import org.springframework.xml.transform.StringResult
-import java.io.StringReader
-import javax.xml.transform.TransformerFactory
-import javax.xml.transform.stream.StreamSource
+import javax.security.auth.callback.Callback
+import javax.security.auth.callback.CallbackHandler
+
 
 @RestController
 @RequestMapping("parcel")
 class ParcelStatusController {
-    private val webServiceTemplate = WebServiceTemplate().apply {
-        setInterceptors(arrayOf(SoapLoggingInterceptor()))
-    }
 
     @GetMapping
     fun getParcel(@RequestParam parcelId: String): String {
-        webServiceTemplate.setInterceptors(arrayOf(SoapLoggingInterceptor()))
+        val service = PpApiTrackingWsTt()
+        val port: SledzeniePortType = service.getSledzenieHttpSoap11Endpoint()
+        val endpointUrl = "https://tt.poczta-polska.pl/Sledzenie/services/Sledzenie"
+        val requestContext = (port as BindingProvider).getRequestContext()
+        requestContext.put(BindingProvider.ENDPOINT_ADDRESS_PROPERTY, endpointUrl)
 
-        val soapBody = """
-    <sled:sprawdzPrzesylkePl xmlns:sled="http://sledzenie.pocztapolska.pl">
-        <sled:numer>$parcelId</sled:numer>
-    </sled:sprawdzPrzesylkePl>
-""".trimIndent()
+        val client: Client = ClientProxy.getClient(port)
+        val outProps: MutableMap<String?, Any?> = HashMap<String?, Any?>()
+        outProps.put("action", "UsernameToken")
+        outProps.put("user", "sledzeniepp")
+        outProps.put("passwordType", "PasswordText") // or PasswordDigest
+        outProps.put("passwordCallbackClass", ClientPasswordCallback::class.java.getName())
 
-        val source = StreamSource(StringReader(soapBody))
-        val result = StringResult()
+        val wssOut = WSS4JOutInterceptor(outProps)
+        client.getOutInterceptors().add(wssOut)
 
-        webServiceTemplate.sendSourceAndReceiveToResult(
-            "https://tt.poczta-polska.pl/Sledzenie/services/Sledzenie",
-            source,
-            WebServiceMessageCallback { message ->
-                val soapMessage = message as SoapMessage
-                soapMessage.soapAction = "urn:sprawdzPrzesylkePl"
+        try {
+            val response: Przesylka = port.sprawdzPrzesylkePl(parcelId)
+            return response.danePrzesylki.value.dataNadania.value.toString()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
 
-                // Add WS-Security header
-                val securityHeader = """
-            <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
-                <wsse:UsernameToken wsu:Id="UsernameToken-2" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
-                    <wsse:Username>sledzeniepp</wsse:Username>
-                    <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">PPSA</wsse:Password>
-                    <wsu:Created>2026-03-13T11:41:31.746Z</wsu:Created>
-                </wsse:UsernameToken>
-            </wsse:Security>
-        """.trimIndent()
+        return ""
+    }
 
-                val header = soapMessage.soapHeader
-                val transformer = TransformerFactory.newInstance().newTransformer()
-                transformer.transform(StreamSource(StringReader(securityHeader)), header?.result)
-            },
-            result
-        )
-
-        return result.toString()
+    class ClientPasswordCallback : CallbackHandler {
+        override fun handle(callbacks: Array<out Callback?>?) {
+            if (callbacks != null) {
+                for (callback in callbacks) {
+                    if (callback is WSPasswordCallback) {
+                        callback.setPassword("PPSA")
+                    }
+                }
+            }
+        }
     }
 }
